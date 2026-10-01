@@ -218,6 +218,11 @@ static void SetAllowedFileSystems(void)
 		allowed_filesystem[FS_FAT16] = TRUE;
 		allowed_filesystem[FS_FAT32] = TRUE;
 		break;
+	case BT_MULTI_ISO:
+		allowed_filesystem[FS_EXFAT] = TRUE;
+		allowed_filesystem[FS_NTFS] = TRUE;
+		allowed_filesystem[FS_FAT32] = TRUE;
+		break;
 	case BT_UEFI_NTFS:
 		allowed_filesystem[FS_NTFS] = TRUE;
 		allowed_filesystem[FS_EXFAT] = TRUE;
@@ -235,6 +240,7 @@ static void SetBootOptions(void)
 	IGNORE_RETVAL(ComboBox_SetItemData(hBootType, ComboBox_AddStringU(hBootType,
 		(image_path == NULL) ? lmprintf(MSG_281, lmprintf(MSG_280)) : short_image_path), BT_IMAGE));
 	image_index = 1;
+	IGNORE_RETVAL(ComboBox_SetItemData(hBootType, ComboBox_AddStringU(hBootType, "Multi-ISO (Hybrid Multi-Boot)"), BT_MULTI_ISO));
 	IGNORE_RETVAL(ComboBox_SetItemData(hBootType, ComboBox_AddStringU(hBootType, "MS-DOS"), BT_MSDOS));
 	IGNORE_RETVAL(ComboBox_SetItemData(hBootType, ComboBox_AddStringU(hBootType, "FreeDOS"), BT_FREEDOS));
 
@@ -315,6 +321,13 @@ static void SetPartitionSchemeAndTargetSystem(BOOL only_target)
 	case BT_GRUB2:
 		allowed_partition_scheme[PARTITION_STYLE_GPT] = FALSE;
 		allowed_target_system[1] = FALSE;
+		break;
+	case BT_MULTI_ISO:
+		allowed_partition_scheme[PARTITION_STYLE_MBR] = TRUE;
+		allowed_partition_scheme[PARTITION_STYLE_GPT] = TRUE;
+		allowed_target_system[0] = TRUE;
+		allowed_target_system[1] = TRUE;
+		allowed_target_system[2] = TRUE;
 		break;
 	case BT_UEFI_NTFS:
 		allowed_target_system[0] = FALSE;
@@ -914,9 +927,20 @@ static BOOL PopulateProperties(void)
 
 	persistence_unit_selection = -1;
 	// Get data from the currently selected drive
-	SelectedDrive.DeviceNumber = (DWORD)ComboBox_GetItemData(hDeviceList, device_index);
+	DWORD raw_item_data = (DWORD)ComboBox_GetItemData(hDeviceList, device_index);
+	DWORD dev_num = DECODE_DRIVE_INDEX(raw_item_data);
+	int target_part = DECODE_PARTITION_INDEX(raw_item_data);
+
+	SelectedDrive.DeviceNumber = dev_num;
+	SelectedDrive.target_partition = target_part;
 	// This fills the SelectedDrive properties
 	GetDrivePartitionData(SelectedDrive.DeviceNumber, fs_name, sizeof(fs_name), FALSE);
+	if (target_part >= 0 && target_part < MAX_PARTITIONS && SelectedDrive.Partition[target_part].Size > 0) {
+		SelectedDrive.DiskSize = SelectedDrive.Partition[target_part].Size;
+		uprintf("Selected target: Partition %d (Offset: %lld, Size: %s) [Non-Destructive Mode]",
+			target_part + 1, SelectedDrive.Partition[target_part].Offset,
+			SizeToHumanReadable(SelectedDrive.Partition[target_part].Size, FALSE, FALSE));
+	}
 	SetPartitionSchemeAndTargetSystem(FALSE);
 	// Attempt to reselect the last file system explicitly set by the user
 	if (!SetFileSystemAndClusterSize((selected_fs == FS_UNKNOWN) ? fs_name : NULL)) {
@@ -931,21 +955,31 @@ static BOOL PopulateProperties(void)
 	static_sprintf(SelectedDrive.proposed_label, "%s",
 		SizeToHumanReadable(SelectedDrive.DiskSize, FALSE, TRUE));
 
+	// Find the drive index in rufus_drive[]
+	int drive_idx = -1;
+	for (int d = 0; d < num_drives; d++) {
+		if (rufus_drive[d].index == SelectedDrive.DeviceNumber) {
+			drive_idx = d;
+			break;
+		}
+	}
+
+	const char* drive_name_str = (drive_idx >= 0) ? rufus_drive[drive_idx].name : "Storage Device";
 	// Add a tooltip (with the size of the device in parenthesis)
-	device_tooltip = (char*) malloc(safe_strlen(rufus_drive[device_index].name) + 32);
+	device_tooltip = (char*) malloc(safe_strlen(drive_name_str) + 64);
 	if (device_tooltip != NULL) {
 		if (right_to_left_mode)
-			safe_sprintf(device_tooltip, safe_strlen(rufus_drive[device_index].name) + 32, "(%s) %s",
-				SizeToHumanReadable(SelectedDrive.DiskSize, FALSE, FALSE), rufus_drive[device_index].name);
+			safe_sprintf(device_tooltip, safe_strlen(drive_name_str) + 64, "(%s) %s",
+				SizeToHumanReadable(SelectedDrive.DiskSize, FALSE, FALSE), drive_name_str);
 		else
-			safe_sprintf(device_tooltip, safe_strlen(rufus_drive[device_index].name) + 32, "%s (%s)",
-				rufus_drive[device_index].name, SizeToHumanReadable(SelectedDrive.DiskSize, FALSE, FALSE));
+			safe_sprintf(device_tooltip, safe_strlen(drive_name_str) + 64, "%s (%s)",
+				drive_name_str, SizeToHumanReadable(SelectedDrive.DiskSize, FALSE, FALSE));
 		CreateTooltip(hDeviceList, device_tooltip, -1);
 		free(device_tooltip);
 	}
 
 out:
-	SetProposedLabel(device_index);
+	SetProposedLabel(drive_idx);
 	return TRUE;
 }
 
@@ -1512,7 +1546,7 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 	if (ComboBox_GetCurSel(hDeviceList) == CB_ERR)
 		goto out;
 
-	if ((zero_drive) || (boot_type == BT_NON_BOOTABLE)) {
+	if ((zero_drive) || (boot_type == BT_NON_BOOTABLE) || ((boot_type == BT_MULTI_ISO) && (image_path == NULL))) {
 		// Nothing to check
 		ret = BOOTCHECK_PROCEED;
 		goto out;
@@ -3130,16 +3164,34 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 		PrintStatus(0, MSG_142);
 
 		GetWindowTextU(hDeviceList, tmp, ARRAYSIZE(tmp));
-		if (Notification(MB_OKCANCEL | MB_ICONWARNING, APPLICATION_NAME, lmprintf(MSG_003, tmp)) != IDOK)
-			goto aborted_start;
-		if ((SelectedDrive.nPartitions > 1) && (Notification(MB_OKCANCEL | MB_ICONWARNING, lmprintf(MSG_094), lmprintf(MSG_093)) != IDOK))
-			goto aborted_start;
+		if (SelectedDrive.target_partition >= 0) {
+			char part_msg[512];
+			static_sprintf(part_msg,
+				"NON-DESTRUCTIVE PARTITION MODE\r\n\r\n"
+				"Only Partition %d (%s) on:\r\n'%s'\r\nwill be formatted.\r\n\r\n"
+				"All other partitions and existing files on this drive will be preserved.\r\n\r\n"
+				"Do you want to proceed with formatting Partition %d?",
+				SelectedDrive.target_partition + 1,
+				SizeToHumanReadable(SelectedDrive.Partition[SelectedDrive.target_partition].Size, FALSE, FALSE),
+				tmp,
+				SelectedDrive.target_partition + 1);
+			if (Notification(MB_OKCANCEL | MB_ICONINFORMATION, APPLICATION_NAME, part_msg) != IDOK)
+				goto aborted_start;
+		} else {
+			if (Notification(MB_OKCANCEL | MB_ICONWARNING, APPLICATION_NAME, lmprintf(MSG_003, tmp)) != IDOK)
+				goto aborted_start;
+			if ((SelectedDrive.nPartitions > 1) && (Notification(MB_OKCANCEL | MB_ICONWARNING, lmprintf(MSG_094), lmprintf(MSG_093)) != IDOK))
+				goto aborted_start;
+		}
 		if ((!zero_drive) && (boot_type != BT_NON_BOOTABLE) && (SelectedDrive.SectorSize != 512) &&
 			(Notification(MB_OKCANCEL | MB_ICONWARNING, lmprintf(MSG_197), lmprintf(MSG_196, SelectedDrive.SectorSize)) != IDOK))
 			goto aborted_start;
 
 		nDeviceIndex = ComboBox_GetCurSel(hDeviceList);
-		DeviceNum = (DWORD)ComboBox_GetItemData(hDeviceList, nDeviceIndex);
+		DWORD raw_item_data = (DWORD)ComboBox_GetItemData(hDeviceList, nDeviceIndex);
+		DeviceNum = DECODE_DRIVE_INDEX(raw_item_data);
+		SelectedDrive.DeviceNumber = DeviceNum;
+		SelectedDrive.target_partition = DECODE_PARTITION_INDEX(raw_item_data);
 		InitProgress(zero_drive || write_as_image);
 		format_thread = CreateThread(NULL, 0, FormatThread, (LPVOID)(uintptr_t)DeviceNum, 0, NULL);
 		if (format_thread == NULL) {

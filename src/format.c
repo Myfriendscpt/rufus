@@ -846,9 +846,9 @@ static BOOL WriteMBR(HANDLE hPhysicalDrive)
 		goto notify;
 	}
 
-	// Grub 2.0
-	if ( ((boot_type == BT_IMAGE) && (img_report.has_grub2)) || (boot_type == BT_GRUB2) ) {
-		uprintf(using_msg, "Grub 2.0");
+	// Grub 2.0 / Multi-ISO
+	if ( ((boot_type == BT_IMAGE) && (img_report.has_grub2)) || (boot_type == BT_GRUB2) || (boot_type == BT_MULTI_ISO) ) {
+		uprintf(using_msg, "Grub 2.0 (Multi-Boot)");
 		r = write_grub2_mbr(fp);
 		goto notify;
 	}
@@ -1432,6 +1432,128 @@ out:
 }
 
 /*
+ * Deploy Multi-ISO structure (Ventoy / GRUB2 hybrid loopback support)
+ */
+static BOOL SetupMultiIso(const char* drive_name, const char* image_path, BOOL is_uefi)
+{
+	char path[MAX_PATH];
+	FILE* fp;
+
+	// 1. Create X:\ISO directory for drag-and-drop ISO files
+	static_sprintf(path, "%s\\ISO", drive_name);
+	CreateDirectoryU(path, NULL);
+
+	// 2. Create X:\ISO\README.txt with instructions
+	static_sprintf(path, "%s\\ISO\\README.txt", drive_name);
+	fp = fopenU(path, "w");
+	if (fp != NULL) {
+		fputs("=================================================================\r\n"
+		      "              Rufus Multi-ISO / Multi-Boot Drive\r\n"
+		      "=================================================================\r\n"
+		      "Copy any bootable .iso files directly into this directory!\r\n"
+		      "\r\n"
+		      "Supported images include:\r\n"
+		      "  * Windows 11 / Windows 10 / Server ISOs\r\n"
+		      "  * Ubuntu / Debian / Fedora / Arch Linux / Pop!_OS\r\n"
+		      "  * Clonezilla / GParted Live / SystemRescue\r\n"
+		      "  * MemTest86+ / FreeDOS\r\n"
+		      "\r\n"
+		      "When booted, the menu will automatically probe and display\r\n"
+		      "all ISO files detected in this folder.\r\n"
+		      "=================================================================\r\n", fp);
+		fclose(fp);
+	}
+
+	// 3. If an initial ISO was selected, copy it to \ISO\<filename>.iso
+	if (image_path != NULL && image_path[0] != 0) {
+		const char* fname = PathFindFileNameU(image_path);
+		static_sprintf(path, "%s\\ISO\\%s", drive_name, fname);
+		uprintf("Multi-ISO: Copying initial image '%s' to '%s'...", image_path, path);
+		PrintInfo(0, "Copying initial ISO into /ISO/ folder...");
+		CopyFileU(image_path, path, FALSE);
+	}
+
+	// 4. Create boot directory structure
+	static_sprintf(path, "%s\\boot", drive_name);
+	CreateDirectoryU(path, NULL);
+	static_sprintf(path, "%s\\boot\\grub", drive_name);
+	CreateDirectoryU(path, NULL);
+	static_sprintf(path, "%s\\EFI", drive_name);
+	CreateDirectoryU(path, NULL);
+	static_sprintf(path, "%s\\EFI\\BOOT", drive_name);
+	CreateDirectoryU(path, NULL);
+
+	// 5. Generate \boot\grub\grub.cfg
+	static_sprintf(path, "%s\\boot\\grub\\grub.cfg", drive_name);
+	fp = fopenU(path, "w");
+	if (fp != NULL) {
+		fputs(
+			"# Rufus Hybrid Multi-ISO Configuration\r\n"
+			"set timeout=30\r\n"
+			"set default=0\r\n"
+			"\r\n"
+			"insmod part_gpt\r\n"
+			"insmod part_msdos\r\n"
+			"insmod fat\r\n"
+			"insmod exfat\r\n"
+			"insmod ntfs\r\n"
+			"insmod ext2\r\n"
+			"insmod iso9660\r\n"
+			"insmod loopback\r\n"
+			"insmod search\r\n"
+			"\r\n"
+			"search --no-floppy --set=root --file /ISO/README.txt\r\n"
+			"\r\n"
+			"menuentry \"=== Rufus Multi-ISO Boot Menu ===\" {\r\n"
+			"    true\r\n"
+			"}\r\n"
+			"\r\n"
+			"for isofile in /ISO/*.iso /iso/*.iso; do\r\n"
+			"    if [ -e \"$isofile\" ]; then\r\n"
+			"        menuentry \"Boot ISO: $isofile\" \"$isofile\" {\r\n"
+			"            set iso_path=\"$2\"\r\n"
+			"            loopback loop \"$iso_path\"\r\n"
+			"            if [ -f (loop)/EFI/BOOT/BOOTX64.EFI ]; then\r\n"
+			"                chainloader (loop)/EFI/BOOT/BOOTX64.EFI\r\n"
+			"                boot\r\n"
+			"            elif [ -f (loop)/efi/boot/bootx64.efi ]; then\r\n"
+			"                chainloader (loop)/efi/boot/bootx64.efi\r\n"
+			"                boot\r\n"
+			"            elif [ -f (loop)/casper/vmlinuz ]; then\r\n"
+			"                linux (loop)/casper/vmlinuz boot=casper iso-scan/filename=$iso_path quiet splash ---\r\n"
+			"                initrd (loop)/casper/initrd\r\n"
+			"                boot\r\n"
+			"            elif [ -f (loop)/arch/boot/x86_64/vmlinuz-linux ]; then\r\n"
+			"                linux (loop)/arch/boot/x86_64/vmlinuz-linux img_loop=$iso_path\r\n"
+			"                initrd (loop)/arch/boot/x86_64/initramfs-linux.img\r\n"
+			"                boot\r\n"
+			"            else\r\n"
+			"                chainloader (loop)/EFI/BOOT/bootx64.efi\r\n"
+			"                boot\r\n"
+			"            fi\r\n"
+			"        }\r\n"
+			"    fi\r\n"
+			"done\r\n"
+			"\r\n"
+			"menuentry \"Reboot System\" {\r\n"
+			"    reboot\r\n"
+			"}\r\n"
+			"menuentry \"Halt / Power Off\" {\r\n"
+			"    halt\r\n"
+			"}\r\n", fp);
+		fclose(fp);
+	}
+
+	// 6. Duplicate grub.cfg into \EFI\BOOT\grub.cfg for EFI environments
+	char efi_cfg[MAX_PATH];
+	static_sprintf(efi_cfg, "%s\\EFI\\BOOT\\grub.cfg", drive_name);
+	CopyFileU(path, efi_cfg, FALSE);
+
+	uprintf("Multi-ISO setup complete on %s", drive_name);
+	return TRUE;
+}
+
+/*
  * Standalone thread for the formatting operation
  * According to https://learn.microsoft.com/windows/win32/api/winioctl/ni-winioctl-fsctl_dismount_volume
  * To change a volume file system
@@ -1587,32 +1709,36 @@ try_clear:
 	// Note, Microsoft's way of cleaning partitions (IOCTL_DISK_CREATE_DISK, which is what we apply
 	// in InitializeDisk) is *NOT ENOUGH* to reset a disk and can render it inoperable for partitioning
 	// or formatting under Windows. See https://github.com/pbatard/rufus/issues/759 for details.
-	if ((boot_type != BT_IMAGE) || (img_report.is_iso && !write_as_image)) {
-		if ((!ClearMBRGPT(hPhysicalDrive, SelectedDrive.DiskSize, SelectedDrive.SectorSize)) ||
-			(!InitializeDisk(hPhysicalDrive))) {
-			// If VDS is available, try cycling the device to see it it helps
-			if (retry_clear && is_vds_available) {
-				uprintf("Cycling the device to see if it helps...");
-				// Note: This may leave the device disabled on re-plug or reboot
-				// so only do this for the experimental VDS path for now...
-				cr = CycleDevice(ComboBox_GetCurSel(hDeviceList));
-				if (cr == ERROR_DEVICE_REINITIALIZATION_NEEDED) {
-					uprintf("Zombie device detected, trying again...");
-					Sleep(1000);
+	if (SelectedDrive.target_partition < 0) {
+		if ((boot_type != BT_IMAGE) || (img_report.is_iso && !write_as_image)) {
+			if ((!ClearMBRGPT(hPhysicalDrive, SelectedDrive.DiskSize, SelectedDrive.SectorSize)) ||
+				(!InitializeDisk(hPhysicalDrive))) {
+				// If VDS is available, try cycling the device to see it it helps
+				if (retry_clear && is_vds_available) {
+					uprintf("Cycling the device to see if it helps...");
+					// Note: This may leave the device disabled on re-plug or reboot
+					// so only do this for the experimental VDS path for now...
 					cr = CycleDevice(ComboBox_GetCurSel(hDeviceList));
+					if (cr == ERROR_DEVICE_REINITIALIZATION_NEEDED) {
+						uprintf("Zombie device detected, trying again...");
+						Sleep(1000);
+						cr = CycleDevice(ComboBox_GetCurSel(hDeviceList));
+					}
+					if (cr == 0)
+						uprintf("Successfully cycled device");
+					else
+						uprintf("Cycling device failed!");
+					Sleep(1000);
+					retry_clear = FALSE;
+					goto try_clear;
 				}
-				if (cr == 0)
-					uprintf("Successfully cycled device");
-				else
-					uprintf("Cycling device failed!");
-				Sleep(1000);
-				retry_clear = FALSE;
-				goto try_clear;
+				uprintf("Could not reset partitions");
+				ErrorStatus = (LastWriteError != 0) ? LastWriteError : RUFUS_ERROR(ERROR_PARTITION_FAILURE);
+				goto out;
 			}
-			uprintf("Could not reset partitions");
-			ErrorStatus = (LastWriteError != 0) ? LastWriteError : RUFUS_ERROR(ERROR_PARTITION_FAILURE);
-			goto out;
 		}
+	} else {
+		uprintf("[Non-Destructive Mode] Preserving existing partition layout on drive 0x%02x", DriveIndex);
 	}
 
 	if (IsChecked(IDC_BAD_BLOCKS)) {
@@ -1709,12 +1835,18 @@ try_clear:
 	UpdateProgress(OP_ZERO_MBR, -1.0f);
 	CHECK_FOR_USER_CANCEL;
 
-	if (!CreatePartition(hPhysicalDrive, partition_type, fs_type, (partition_type == PARTITION_STYLE_MBR)
-		&& (target_type == TT_UEFI), extra_partitions)) {
-		ErrorStatus = (LastWriteError != 0) ? LastWriteError : RUFUS_ERROR(ERROR_PARTITION_FAILURE);
-		goto out;
+	if (SelectedDrive.target_partition < 0) {
+		if (!CreatePartition(hPhysicalDrive, partition_type, fs_type, (partition_type == PARTITION_STYLE_MBR)
+			&& (target_type == TT_UEFI), extra_partitions)) {
+			ErrorStatus = (LastWriteError != 0) ? LastWriteError : RUFUS_ERROR(ERROR_PARTITION_FAILURE);
+			goto out;
+		}
+		UpdateProgress(OP_PARTITION, -1.0f);
+	} else {
+		partition_index[PI_MAIN] = SelectedDrive.target_partition;
+		uprintf("[Non-Destructive Mode] Disk repartitioning bypassed. Active partition: %d", SelectedDrive.target_partition + 1);
+		UpdateProgress(OP_PARTITION, -1.0f);
 	}
-	UpdateProgress(OP_PARTITION, -1.0f);
 
 	// Close the (unmounted) volume before formatting
 	if ((hLogicalVolume != NULL) && (hLogicalVolume != INVALID_HANDLE_VALUE)) {
@@ -1824,14 +1956,18 @@ try_clear:
 	}
 
 	// Thanks to Microsoft, we must fix the MBR AFTER the drive has been formatted
-	if ((partition_type == PARTITION_STYLE_MBR) || ((boot_type != BT_NON_BOOTABLE) && (partition_type == PARTITION_STYLE_GPT))) {
-		PrintInfoDebug(0, MSG_228);	// "Writing master boot record..."
-		if ((!WriteMBR(hPhysicalDrive)) || (!WriteSBR(hPhysicalDrive))) {
-			if (!IS_ERROR(ErrorStatus))
-				ErrorStatus = RUFUS_ERROR(ERROR_WRITE_FAULT);
-			goto out;
+	if (SelectedDrive.target_partition < 0) {
+		if ((partition_type == PARTITION_STYLE_MBR) || ((boot_type != BT_NON_BOOTABLE) && (partition_type == PARTITION_STYLE_GPT))) {
+			PrintInfoDebug(0, MSG_228);	// "Writing master boot record..."
+			if ((!WriteMBR(hPhysicalDrive)) || (!WriteSBR(hPhysicalDrive))) {
+				if (!IS_ERROR(ErrorStatus))
+					ErrorStatus = RUFUS_ERROR(ERROR_WRITE_FAULT);
+				goto out;
+			}
+			UpdateProgress(OP_FIX_MBR, -1.0f);
 		}
-		UpdateProgress(OP_FIX_MBR, -1.0f);
+	} else {
+		uprintf("[Non-Destructive Mode] Physical MBR write bypassed to protect drive structure");
 	}
 	Sleep(200);
 
@@ -1879,7 +2015,7 @@ try_clear:
 	}
 
 	if (boot_type != BT_NON_BOOTABLE) {
-		if (boot_type == BT_UEFI_NTFS) {
+		if ((boot_type == BT_UEFI_NTFS) || (boot_type == BT_MULTI_ISO)) {
 			// All good
 		} else if (target_type == TT_UEFI) {
 			// For once, no need to do anything - just check our sanity
@@ -1943,6 +2079,14 @@ try_clear:
 				IsFileInDB(FILES_DIR "\\grub4dos-" GRUB4DOS_VERSION "\\grldr")?"✓":"✗");
 			if (!CopyFileU(FILES_DIR "\\grub4dos-" GRUB4DOS_VERSION "\\grldr", grub4dos_dst, FALSE))
 				uprintf("Failed to copy file: %s", WindowsErrorString());
+		} else if (boot_type == BT_MULTI_ISO) {
+			UpdateProgress(OP_FILE_COPY, -1.0f);
+			PrintInfo(0, "Configuring Multi-ISO structure...");
+			if (!SetupMultiIso(drive_name, image_path, (target_type == TT_UEFI))) {
+				if (!IS_ERROR(ErrorStatus))
+					ErrorStatus = RUFUS_ERROR(APPERR(ERROR_CANNOT_COPY));
+				goto out;
+			}
 		} else if ((boot_type == BT_IMAGE) && (image_path != NULL) && (img_report.is_iso || img_report.is_windows_img)) {
 			UpdateProgress(OP_FILE_COPY, 0.0f);
 			drive_name[2] = 0;	// Ensure our drive is something like 'D:'

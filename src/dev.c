@@ -1063,15 +1063,59 @@ BOOL GetDevices(DWORD devnum)
 	// Now populate the drive combo box
 	// NB: The combo box must have the UNSORTED attribute for indexes to remain the ones we assign
 	for (u = 0; u < num_drives; u++) {
+		HANDLE hPhysical;
+		BYTE layout_buf[4096] = {0};
+		PDRIVE_LAYOUT_INFORMATION_EX pLayout = (PDRIVE_LAYOUT_INFORMATION_EX)(void*)layout_buf;
+		DWORD layout_size = 0;
+		int part_idx = 0;
+
 		IGNORE_RETVAL(ComboBox_SetItemData(hDeviceList, ComboBox_AddStringU(hDeviceList, rufus_drive[u].display_name), rufus_drive[u].index));
 		maxwidth = max(maxwidth, GetEntryWidth(hDeviceList, rufus_drive[u].display_name));
+
+		// Check if the drive contains distinct partitions that can be individually targeted (Non-Destructive Mode)
+		hPhysical = GetPhysicalHandle(rufus_drive[u].index, FALSE, FALSE, TRUE);
+		if (hPhysical != INVALID_HANDLE_VALUE) {
+			if (DeviceIoControl(hPhysical, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, NULL, 0, layout_buf, sizeof(layout_buf), &layout_size, NULL) && layout_size > 0) {
+				for (DWORD p = 0; p < pLayout->PartitionCount; p++) {
+					uint64_t plen = pLayout->PartitionEntry[p].PartitionLength.QuadPart;
+					if (plen < 16 * MB)
+						continue;
+					if (pLayout->PartitionStyle == PARTITION_STYLE_MBR) {
+						BYTE pt = pLayout->PartitionEntry[p].Mbr.PartitionType;
+						if ((pt == PARTITION_ENTRY_UNUSED) || (pt == 0x05) || (pt == 0x0f) || (pt == 0xee))
+							continue;
+					} else if (pLayout->PartitionStyle == PARTITION_STYLE_GPT) {
+						if (CompareGUID(&pLayout->PartitionEntry[p].Gpt.PartitionType, &GUID_NULL) ||
+							CompareGUID(&pLayout->PartitionEntry[p].Gpt.PartitionType, &PARTITION_MICROSOFT_RESERVED))
+							continue;
+					}
+
+					char part_label[256];
+					const char* fs_desc = GetFsName(hPhysical, pLayout->PartitionEntry[p].StartingOffset);
+					char* log_name = GetLogicalName(rufus_drive[u].index, pLayout->PartitionEntry[p].StartingOffset.QuadPart, FALSE, TRUE);
+					static_sprintf(part_label, "   └─ Partition %d: %s%s%s (%s) [Non-Destructive]",
+						part_idx + 1,
+						(log_name != NULL && log_name[0] != 0) ? log_name : "",
+						(log_name != NULL && log_name[0] != 0) ? " " : "",
+						(fs_desc != NULL && fs_desc[0] != 0) ? fs_desc : "Volume",
+						SizeToHumanReadable(plen, FALSE, FALSE));
+					safe_free(log_name);
+
+					DWORD encoded_item = ENCODE_DRIVE_PARTITION(rufus_drive[u].index, part_idx);
+					IGNORE_RETVAL(ComboBox_SetItemData(hDeviceList, ComboBox_AddStringU(hDeviceList, part_label), encoded_item));
+					maxwidth = max(maxwidth, GetEntryWidth(hDeviceList, part_label));
+					part_idx++;
+				}
+			}
+			safe_closehandle(hPhysical);
+		}
 	}
 	// Adjust the Dropdown width to the maximum text size
 	SendMessage(hDeviceList, CB_SETDROPPEDWIDTH, (WPARAM)maxwidth, 0);
 
 	if (devnum >= DRIVE_INDEX_MIN) {
 		for (i = 0; i < ComboBox_GetCount(hDeviceList); i++) {
-			if ((DWORD)ComboBox_GetItemData(hDeviceList, i) == devnum) {
+			if (DECODE_DRIVE_INDEX((DWORD)ComboBox_GetItemData(hDeviceList, i)) == devnum) {
 				found = TRUE;
 				break;
 			}

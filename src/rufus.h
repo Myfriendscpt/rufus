@@ -69,6 +69,9 @@
 #define DRIVE_ACCESS_RETRIES        150			// How many times we should retry
 #define DRIVE_INDEX_MIN             0x00000080
 #define DRIVE_INDEX_MAX             0x000000C0
+#define ENCODE_DRIVE_PARTITION(d, p) ((DWORD)(((d) & 0xFFFF) | ((((p) + 1) & 0xFFFF) << 16)))
+#define DECODE_DRIVE_INDEX(val)     ((DWORD)((val) & 0xFFFF))
+#define DECODE_PARTITION_INDEX(val) ((int)((((val) >> 16) & 0xFFFF) - 1))
 #define MIN_DRIVE_SIZE              (8 * MB)	// Minimum size a drive must have, to be formattable
 #define MIN_EXTRA_PART_SIZE         (1 * MB)	// Minimum size of the extra partition, in bytes
 #define MIN_EXT_SIZE                (256 * MB)	// Minimum size we allow for ext formatting
@@ -320,6 +323,7 @@ enum boot_type {
 	BT_MSDOS,
 	BT_FREEDOS,
 	BT_IMAGE,
+	BT_MULTI_ISO,		// Hybrid / Multi-ISO Mode (Ventoy / GRUB integration)
 	BT_SYSLINUX_V4,		// Start of indexes that only display in advanced mode
 	BT_SYSLINUX_V6,
 	BT_REACTOS,

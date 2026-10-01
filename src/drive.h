@@ -347,6 +347,7 @@ typedef struct {
 	MEDIA_TYPE MediaType;
 	int PartitionStyle;
 	int nPartitions;	// number of partitions we actually care about
+	int target_partition;	// -1 for entire disk (destructive), >= 0 for specific partition (non-destructive)
 	struct {
 		wchar_t Name[36];
 		uint64_t Offset;
