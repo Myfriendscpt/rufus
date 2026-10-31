@@ -640,11 +640,12 @@ void ApplyWriteThrottle(DWORD bytes_written)
 
 	if (expected_ms > elapsed_ms) {
 		DWORD sleep_ms = (DWORD)(expected_ms - elapsed_ms);
-		while (sleep_ms > 0 && HRESULT_CODE(ErrorStatus) != ERROR_CANCELLED) {
+		while (sleep_ms > 0 && HRESULT_CODE(ErrorStatus) != ERROR_CANCELLED && write_throttle_limit_mbps > 0) {
 			DWORD chunk = (sleep_ms > 40) ? 40 : sleep_ms;
 			Sleep(chunk);
 			sleep_ms -= chunk;
 		}
+		elapsed_ms = GetTickCount64() - throttle_start_tick;
 	}
 
 	if (elapsed_ms >= 2000) {
