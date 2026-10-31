@@ -61,6 +61,7 @@ extern char* ini_file;
 #define SETTING_PRESERVE_TIMESTAMPS         "PreserveTimestamps"
 #define SETTING_VERBOSE_UPDATES             "VerboseUpdateCheck"
 #define SETTING_WUE_OPTIONS                 "WindowsUserExperienceOptions"
+#define SETTING_WRITE_THROTTLE_MBPS         "WriteThrottleLimitMBps"
 
 
 static __inline BOOL CheckIniKey(const char* key) {

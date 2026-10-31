@@ -1254,8 +1254,10 @@ static BOOL WriteDrive(HANDLE hPhysicalDrive, BOOL bZeroDrive)
 			for (i = 1; i <= WRITE_RETRIES; i++) {
 				CHECK_FOR_USER_CANCEL;
 				s = WriteFile(hPhysicalDrive, buffer, read_size[0], &write_size, NULL);
-				if ((s) && (write_size == read_size[0]))
+				if ((s) && (write_size == read_size[0])) {
+					ApplyWriteThrottle(write_size);
 					break;
+				}
 				if (s)
 					uprintf("\r\nWrite error: Wrote %d bytes, expected %d bytes", write_size, read_size[0]);
 				else
@@ -1392,8 +1394,10 @@ static BOOL WriteDrive(HANDLE hPhysicalDrive, BOOL bZeroDrive)
 			for (i = 1; i <= WRITE_RETRIES; i++) {
 				CHECK_FOR_USER_CANCEL;
 				s = WriteFile(hPhysicalDrive, &buffer[proc_bufnum * buf_size], read_size[proc_bufnum], &write_size, NULL);
-				if ((s) && (write_size == read_size[proc_bufnum]))
+				if ((s) && (write_size == read_size[proc_bufnum])) {
+					ApplyWriteThrottle(write_size);
 					break;
+				}
 				if (s)
 					uprintf("\r\nWrite error: Wrote %d bytes, expected %d bytes", write_size, read_size[proc_bufnum]);
 				else
@@ -1590,6 +1594,10 @@ DWORD WINAPI FormatThread(void* param)
 	large_drive = (SelectedDrive.DiskSize > (1*TB));
 	if (large_drive)
 		uprintf("Notice: Large drive detected (may produce short writes)");
+
+	ResetWriteThrottle();
+	if (write_throttle_limit_mbps > 0)
+		uprintf("USB Write Speed Limiter / Thermal Throttle active: %d MB/s limit", write_throttle_limit_mbps);
 
 	// Find out if we need to add any extra partitions
 	extra_partitions = 0;

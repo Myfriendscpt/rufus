@@ -3330,6 +3330,8 @@ static void PrintUsage(char* appname)
 	printf("     Select the locale to be used on startup\n");
 	printf("  -f FILESYSTEM, --filesystem=FILESYSTEM\n");
 	printf("     Preselect the file system to be preferred when formatting\n");
+	printf("  -T MB/s, --throttle=MB/s\n");
+	printf("     Limit USB write speed (e.g. 10, 20, 30, 50) to prevent flash drive overheating\n");
 	printf("  -w TIMEOUT, --wait=TIMEOUT\n");
 	printf("     Wait TIMEOUT tens of seconds for the global application mutex to be released.\n");
 	printf("     Used when launching a newer version of " APPLICATION_NAME " from a running application.\n");
@@ -3433,6 +3435,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		{"locale",     required_argument, NULL, 'l'},
 		{"filesystem", required_argument, NULL, 'f'},
 		{"wait",       required_argument, NULL, 'w'},
+		{"throttle",   required_argument, NULL, 'T'},
 		{0, 0, NULL, 0}
 	};
 
@@ -3621,7 +3624,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				}
 			}
 
-			while ((opt = getopt_long(argc, argv, "ghxf:i:l:w:z:", long_options, &option_index)) != EOF) {
+			while ((opt = getopt_long(argc, argv, "ghxf:i:l:w:z:T:", long_options, &option_index)) != EOF) {
 				switch (opt) {
 				case 'x':
 					enable_HDDs = TRUE;
@@ -3667,6 +3670,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					if ((preselected_fs < FS_UNKNOWN) || (preselected_fs >= FS_MAX))
 						preselected_fs = FS_UNKNOWN;
 					selected_fs = preselected_fs;
+					break;
+				case 'T':
+					write_throttle_limit_mbps = (int)strtol(optarg, NULL, 10);
+					if (write_throttle_limit_mbps < 0)
+						write_throttle_limit_mbps = 0;
+					WriteSetting32(SETTING_WRITE_THROTTLE_MBPS, write_throttle_limit_mbps);
 					break;
 				case 'w':
 					wait_for_mutex = atoi(optarg);
@@ -3751,6 +3760,11 @@ skip_args_processing:
 	ignore_boot_marker = ReadSettingBool(SETTING_IGNORE_BOOT_MARKER);
 	persistent_log = ReadSettingBool(SETTING_PERSISTENT_LOG);
 	save_image_type = ReadSettingStr(SETTING_PREFERRED_SAVE_IMAGE_TYPE);
+	write_throttle_limit_mbps = ReadSetting32(SETTING_WRITE_THROTTLE_MBPS);
+	if (write_throttle_limit_mbps < 0)
+		write_throttle_limit_mbps = 0;
+	if (write_throttle_limit_mbps > 0)
+		uprintf("USB Write Speed Limiter active: %d MB/s", write_throttle_limit_mbps);
 	// This restores the Windows User Experience/unattend.xml mask from the saved user
 	// settings, and is designed to work even if we add new options later.
 	wue_options = ReadSetting32(SETTING_WUE_OPTIONS);
@@ -4301,6 +4315,32 @@ extern int TestHashes(void);
 				if (list_non_usb_removable_drives)
 					uprintf("By using this unofficial cheat mode you forfeit ANY RIGHT to complain if you lose valuable data!");
 				GetDevices(0);
+				continue;
+			}
+
+			// Ctrl-Alt-T => Cycle USB Write Speed Limiter / Thermal Throttle Mode
+			if ((msg.message == WM_KEYDOWN) && (msg.wParam == 'T') &&
+				(GetKeyState(VK_CONTROL) & 0x8000) && (GetKeyState(VK_MENU) & 0x8000)) {
+				static const int throttle_presets[] = { 0, 10, 20, 35, 50 };
+				int cur_preset_idx = 0;
+				for (int p = 0; p < ARRAYSIZE(throttle_presets); p++) {
+					if (write_throttle_limit_mbps == throttle_presets[p]) {
+						cur_preset_idx = p;
+						break;
+					}
+				}
+				cur_preset_idx = (cur_preset_idx + 1) % ARRAYSIZE(throttle_presets);
+				write_throttle_limit_mbps = throttle_presets[cur_preset_idx];
+				WriteSetting32(SETTING_WRITE_THROTTLE_MBPS, write_throttle_limit_mbps);
+				if (write_throttle_limit_mbps > 0) {
+					char throttle_msg[128];
+					static_sprintf(throttle_msg, "Write Throttle: %d MB/s (Thermal Safe)", write_throttle_limit_mbps);
+					PrintStatusTimeout(throttle_msg, TRUE);
+					uprintf("USB Write Speed Limiter / Thermal Throttle set to %d MB/s", write_throttle_limit_mbps);
+				} else {
+					PrintStatusTimeout("Write Throttle: Disabled (Max Speed)", FALSE);
+					uprintf("USB Write Speed Limiter / Thermal Throttle disabled (unlimited speed)");
+				}
 				continue;
 			}
 

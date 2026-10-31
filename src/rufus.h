@@ -788,6 +788,7 @@ extern windows_version_t WindowsVersion;
 extern sbat_entry_t* sbat_entries;
 extern thumbprint_list_t *sb_active_certs, *sb_revoked_certs;
 extern int dialog_showing, force_update, fs_type, boot_type, partition_type, target_type;
+extern int write_throttle_limit_mbps;
 extern unsigned long syslinux_ldlinux_len[2];
 extern char ubuffer[UBUFFER_SIZE], embedded_sl_version_str[2][12];
 extern char szFolderPath[MAX_PATH], app_dir[MAX_PATH], temp_dir[MAX_PATH], system_dir[MAX_PATH];
@@ -900,6 +901,8 @@ extern uint64_t GetSignatureTimeStamp(const char* path);
 extern LONG ValidateSignature(HWND hDlg, const char* path);
 extern BOOL ValidateOpensslSignature(BYTE* pbBuffer, DWORD dwBufferLen, BYTE* pbSignature, DWORD dwSigLen);
 extern BOOL IsFontAvailable(const char* font_name);
+extern void ResetWriteThrottle(void);
+extern void ApplyWriteThrottle(DWORD bytes_written);
 extern BOOL WriteFileWithRetry(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
 	LPDWORD lpNumberOfBytesWritten, DWORD nNumRetries);
 extern HANDLE CreateFileWithTimeout(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,

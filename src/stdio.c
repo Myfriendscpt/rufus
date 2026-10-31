@@ -611,6 +611,48 @@ HANDLE CreateFileWithTimeout(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwS
 	return params.hFile;
 }
 
+int write_throttle_limit_mbps = 0;
+static uint64_t throttle_bytes_accumulated = 0;
+static uint64_t throttle_start_tick = 0;
+
+void ResetWriteThrottle(void)
+{
+	throttle_bytes_accumulated = 0;
+	throttle_start_tick = GetTickCount64();
+}
+
+void ApplyWriteThrottle(DWORD bytes_written)
+{
+	if (write_throttle_limit_mbps <= 0 || bytes_written == 0)
+		return;
+
+	uint64_t current_tick = GetTickCount64();
+	if (throttle_start_tick == 0) {
+		throttle_start_tick = current_tick;
+		throttle_bytes_accumulated = bytes_written;
+		return;
+	}
+
+	throttle_bytes_accumulated += (uint64_t)bytes_written;
+	uint64_t bytes_per_sec = (uint64_t)write_throttle_limit_mbps * 1024ULL * 1024ULL;
+	uint64_t expected_ms = (throttle_bytes_accumulated * 1000ULL) / bytes_per_sec;
+	uint64_t elapsed_ms = current_tick - throttle_start_tick;
+
+	if (expected_ms > elapsed_ms) {
+		DWORD sleep_ms = (DWORD)(expected_ms - elapsed_ms);
+		while (sleep_ms > 0 && HRESULT_CODE(ErrorStatus) != ERROR_CANCELLED) {
+			DWORD chunk = (sleep_ms > 40) ? 40 : sleep_ms;
+			Sleep(chunk);
+			sleep_ms -= chunk;
+		}
+	}
+
+	if (elapsed_ms >= 2000) {
+		throttle_start_tick = GetTickCount64();
+		throttle_bytes_accumulated = 0;
+	}
+}
+
 // A WriteFile() equivalent, with up to nNumRetries write attempts on error.
 BOOL WriteFileWithRetry(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
 	LPDWORD lpNumberOfBytesWritten, DWORD nNumRetries)
@@ -633,6 +675,7 @@ BOOL WriteFileWithRetry(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWr
 	for (nTry = 1; nTry <= nNumRetries && (HRESULT_CODE(ErrorStatus) != ERROR_CANCELLED); nTry++) {
 		if (WriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, (LPOVERLAPPED)&overlapped)) {
 			LastWriteError = 0;
+			ApplyWriteThrottle(*lpNumberOfBytesWritten);
 			if (nNumberOfBytesToWrite == *lpNumberOfBytesWritten)
 				return TRUE;
 			// Some large drives return 0, even though all the data was written - See github #787 */
